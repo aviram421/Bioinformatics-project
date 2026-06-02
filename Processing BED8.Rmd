@@ -1,0 +1,136 @@
+---
+title: "Processing BED8"
+output: html_document
+date: "2026-02-02"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(GenomicRanges)
+library(rtracklayer)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(Biostrings)
+library(ggplot2)
+library(dplyr)
+```
+
+```{r creating a bed table}
+bed <- read.table('/Users/aviram/Desktop/תואר/שנה ה׳/ביואינפורמטיקה/פרויקט גמר/קבצי קלט ופלט/Lifted_bed_file.bed', sep="\t", header=FALSE, stringsAsFactors=FALSE)
+colnames(bed) <- c("chr","start","end","name","score","strand","thickStart","thickEnd")
+```
+
+```{r create GRanges object, echo=FALSE, include=TRUE}
+
+peaks <- GRanges(
+  seqnames = bed$chr,
+  ranges   = IRanges(start = bed$start + 1, end = bed$end),
+  strand   = bed$strand
+)
+mcols(peaks)$name  <- bed$name
+mcols(peaks)$score <- bed$score
+```
+
+```{r pie chart of regions, include=TRUE}
+txdb <- TxDb.Hsapiens.UCSC.hg38.knownGene
+utr3 <- unlist(threeUTRsByTranscript(txdb), use.names = FALSE)
+utr3_union <- reduce(utr3, ignore.strand = TRUE)
+
+peaks_in_3utr <- subsetByOverlaps(peaks, utr3_union, ignore.strand = TRUE)
+
+# Keep BED8 rows (with summit) that overlap 3'UTR
+keep_idx <- countOverlaps(peaks, utr3_union, ignore.strand = TRUE) > 0
+bed_in_3utr <- bed[keep_idx, ]
+
+write.table(
+  bed_in_3utr,
+  file = "par_clip_in_3utr_hg38.bed",
+  sep = "\t", quote = FALSE, row.names = FALSE, col.names = FALSE
+)
+
+num_total <- length(peaks)
+num_3utr  <- length(peaks_in_3utr)
+pct_3utr  <- round(100 * num_3utr / num_total, 1)
+
+df_pie <- data.frame(
+  region = c("3'UTR", "Other"),
+  count  = c(num_3utr, num_total - num_3utr)
+)
+df_pie$pct <- round(100 * df_pie$count / sum(df_pie$count), 1)
+df_pie$label <- ifelse(df_pie$pct < 2, "", paste0(df_pie$pct, "%"))
+
+ggplot(df_pie, aes(x = "", y = count, fill = region)) +
+  geom_col(width = 1, color = "white", linewidth = 0.6) +
+  coord_polar(theta = "y") +
+  theme_void(base_size = 14) +
+  geom_text(aes(label = label), position = position_stack(vjust = 0.5), size = 4) +
+  labs(
+    title = paste0("Genomic distribution of PAR-CLIP binding sites"),
+    fill = "Region"
+  ) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    legend.position = "right"
+  )
+```
+```{r create fixed windows}
+summit <- GRanges(
+  seqnames = bed$chr,
+  ranges   = IRanges(start = bed$thickStart + 1, width = 1),  # thickStart הוא 0-based
+  strand   = bed$strand
+)
+
+mcols(summit)$name <- bed$name
+win51 <- resize(summit, width = 51, fix = "center")
+
+txdb <- TxDb.Hsapiens.UCSC.hg38.knownGene
+utr3 <- unlist(threeUTRsByTranscript(txdb), use.names = FALSE)
+utr3_union <- reduce(utr3, ignore.strand = TRUE)
+
+# לשמור רק summits שחופפים 3'UTR
+keep_summit <- countOverlaps(summit, utr3_union, ignore.strand = TRUE) > 0
+summit_3utr <- summit[keep_summit]
+
+# עכשיו חלונות 51nt סביב אותם summits
+win51 <- resize(summit_3utr, width = 51, fix = "center")
+
+# יצירת טבלת BED מהחלונות
+bed_windows <- data.frame(
+  chr = as.character(seqnames(win51)),
+  start = start(win51) - 1,  # BED הוא 0-based
+  end = end(win51),
+  name = mcols(win51)$name,
+  score = 0,
+  strand = as.character(strand(win51)),
+  stringsAsFactors = FALSE
+)
+
+# שמירת הקובץ
+write.table(
+  bed_windows,
+  file = "PARCLIP_3UTR_windows51.bed",
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE,
+  col.names = FALSE
+)
+
+# # יצירת Fasta
+# seqs51 <- getSeq(BSgenome.Hsapiens.UCSC.hg38, win51)
+# 
+# neg <- strand(win51) == "-"
+# seqs51[neg] <- reverseComplement(seqs51[neg])
+# 
+# rna_seqs <- RNAStringSet(chartr("T", "U", as.character(seqs51)))
+# 
+# names(rna_seqs) <- paste0(
+#   mcols(win51)$name, "|",
+#   as.character(seqnames(win51)), ":", start(win51), "-", end(win51), "|",
+#   as.character(strand(win51))
+# )
+# 
+# writeXStringSet(rna_seqs,"PARCLIP_3UTR_windows51_RNA.fasta")
+# 
+# stopifnot(all(width(rna_seqs) == 51))
+```
+
